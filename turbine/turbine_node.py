@@ -48,3 +48,36 @@ class TurbineNode:
         data = json.dumps(message).encode()
         self.sock.sendto(data, self.satellite_addr)
         print(f"[{self.node_id}] Sent {msg_type} to {destination}")
+
+    def handle_message(self, message, addr):
+        msg_type = message.get("type")
+
+        if msg_type == "HELLO":
+            print(f"[{self.node_id}] Received HELLO from {message['node_id']}")
+            self.send_message(
+                msg_type="ACK",
+                destination=message["node_id"],
+                service="handshake",
+                payload={"ack_for": message["msg_id"]},
+            )
+        else:
+            print(f"[{self.node_id}] Unknown message type: {msg_type}")
+
+    def run(self):
+        print(f"[{self.node_id}] Running...")
+        while True:
+            data, addr = self.sock.recvfrom(4096)
+            try:
+                message = json.loads(data.decode())
+                self.handle_message(message, addr)
+            except json.JSONDecodeError:
+                print(f"[{self.node_id}] Received malformed message")
+
+
+if __name__ == "__main__":
+    turbine = TurbineNode(
+        node_id="TURBINE_1",
+        listen_port=6001,
+        satellite_addr=("127.0.0.1", 5001),
+    )
+    turbine.run()
