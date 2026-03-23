@@ -57,6 +57,31 @@ class TurbineNode:
             payload=self.state.copy(),
         )
 
+    def handle_control_command(self, message):
+        payload = message.get("payload", {})
+        updated = {}
+
+        if "yaw_angle" in payload:
+            self.state["yaw_angle"] = payload["yaw_angle"]
+            updated["yaw_angle"] = payload["yaw_angle"]
+
+        if "pitch_angle" in payload:
+            self.state["pitch_angle"] = payload["pitch_angle"]
+            updated["pitch_angle"] = payload["pitch_angle"]
+
+        print(f"[{self.node_id}] State updated: {updated}")
+
+        # ACK back with what was changed
+        self.send_message(
+            msg_type="ACK",
+            destination=message["node_id"],
+            service="control",
+            payload={
+                "ack_for": message["msg_id"],
+                "applied": updated,
+            },
+        )
+
     def handle_message(self, message, addr):
         msg_type = message.get("type")
 
@@ -72,6 +97,10 @@ class TurbineNode:
         elif msg_type == "TELEMETRY_REQUEST":
             print(f"[{self.node_id}] Telemetry requested by {message['node_id']}")
             self.send_telemetry(destination=message["node_id"])
+
+        elif msg_type == "CONTROL_COMMAND":
+            print(f"[{self.node_id}] Control command from {message['node_id']}")
+            self.handle_control_command(message)
 
         else:
             print(f"[{self.node_id}] Unknown message type: {msg_type}")
