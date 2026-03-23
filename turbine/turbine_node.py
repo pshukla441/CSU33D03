@@ -1,10 +1,12 @@
 import socket
 import json
 import time
+import threading
+import random
 
 
 class TurbineNode:
-    def __init__(self, node_id, listen_port, satellite_addr):
+    def __init__(self, node_id, listen_port, satellite_addr, telemetry_interval=5):
         # Identity
         self.node_id = node_id
 
@@ -24,6 +26,9 @@ class TurbineNode:
 
         # Message counter for unique IDs
         self.msg_counter = 0
+
+        # Telemetry config
+        self.telemetry_interval = telemetry_interval
 
         # Create and bind UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -57,6 +62,28 @@ class TurbineNode:
             payload=self.state.copy(),
         )
 
+    # ---- Dynamic state simulation ----
+
+    def simulate_state(self):
+        """Runs in a background thread. Updates turbine state with realistic drift."""
+        while True:
+            self.state["wind_speed"] = max(0, self.state["wind_speed"] + random.uniform(-1.0, 1.0))
+            self.state["rpm"] = max(0, self.state["rpm"] + random.uniform(-50, 50))
+            self.state["temperature"] = max(0, self.state["temperature"] + random.uniform(-0.5, 0.5))
+            self.state["vibration"] = max(0, round(self.state["vibration"] + random.uniform(-0.05, 0.05), 3))
+            time.sleep(1)
+
+    # ---- Automatic telemetry ----
+
+    def telemetry_loop(self):
+        """Runs in a background thread. Sends telemetry at a fixed interval."""
+        while True:
+            time.sleep(self.telemetry_interval)
+            print(f"[{self.node_id}] Auto telemetry | wind={self.state['wind_speed']:.1f} rpm={self.state['rpm']:.0f} temp={self.state['temperature']:.1f}")
+            self.send_telemetry()
+
+    # ---- Message handling ----
+
     def handle_control_command(self, message):
         payload = message.get("payload", {})
         updated = {}
@@ -71,7 +98,6 @@ class TurbineNode:
 
         print(f"[{self.node_id}] State updated: {updated}")
 
-        # ACK back with what was changed
         self.send_message(
             msg_type="ACK",
             destination=message["node_id"],
@@ -107,6 +133,12 @@ class TurbineNode:
 
     def run(self):
         print(f"[{self.node_id}] Running...")
+
+        # Start background threads
+        threading.Thread(target=self.simulate_state, daemon=True).start()
+        threading.Thread(target=self.telemetry_loop, daemon=True).start()
+
+        # Main receive loop
         while True:
             data, addr = self.sock.recvfrom(4096)
             try:
@@ -121,5 +153,6 @@ if __name__ == "__main__":
         node_id="TURBINE_1",
         listen_port=6001,
         satellite_addr=("127.0.0.1", 5001),
+        telemetry_interval=5,
     )
     turbine.run()
