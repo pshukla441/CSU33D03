@@ -49,6 +49,14 @@ class TurbineNode:
         self.sock.sendto(data, self.satellite_addr)
         print(f"[{self.node_id}] Sent {msg_type} to {destination}")
 
+    def send_telemetry(self, destination="CONTROL_1"):
+        self.send_message(
+            msg_type="TELEMETRY",
+            destination=destination,
+            service="telemetry",
+            payload=self.state.copy(),
+        )
+
     def handle_message(self, message, addr):
         msg_type = message.get("type")
 
@@ -60,6 +68,11 @@ class TurbineNode:
                 service="handshake",
                 payload={"ack_for": message["msg_id"]},
             )
+
+        elif msg_type == "TELEMETRY_REQUEST":
+            print(f"[{self.node_id}] Telemetry requested by {message['node_id']}")
+            self.send_telemetry(destination=message["node_id"])
+
         else:
             print(f"[{self.node_id}] Unknown message type: {msg_type}")
 
