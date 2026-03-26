@@ -174,6 +174,18 @@ class TurbineNode:
                     "protocol_version": "1.0",
                 },
             )
+        elif msg_type == "SENSOR_DATA":
+            payload = message.get("payload", {}) # Sensor node is reporting — merge into turbine state
+            for key in ["vibration", "temperature", "wind_speed"]:
+                if key in payload:
+                    self.state[key] = payload[key]
+            print(f"[{self.node_id}] Sensor update received from {message['node_id']}")
+
+        elif msg_type == "BLADE_STATUS":
+        # Blade actuator reporting current position
+            payload = message.get("payload", {})
+            print(f"[{self.node_id}] Blade status — yaw={payload.get('current_yaw')} pitch={payload.get('current_pitch')} moving={payload.get('moving')}")
+        
         elif msg_type == "NEGOTIATE":
             print(f"[{self.node_id}] NEGOTIATE from {message['node_id']}")
             self.send_message(
