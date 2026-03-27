@@ -6,19 +6,16 @@ import time
 import threading
 from datetime import datetime, timezone
 
-# ── Ground station & turbine coordinates (randomly generated placeholders) ──
+# Ground station & turbine coordinates (randomly generated placeholders)
 CONTROL_LAT =  51.23   # ground control station
 CONTROL_LON =  -1.58
-
 TURBINE_LAT  =  48.76  # wind turbine field
 TURBINE_LON  =  2.34
 
-# ── Identity ────────────────────────────────────────────────────────────────
 MY_PORT    = 6004
 MY_ID      = "CONTROL_1"
 TURBINE_ID = "TURBINE_1"
 
-# ── Satellite routing ────────────────────────────────────────────────────────
 
 def resolve_satellite_port(sat_id: str) -> int:
     """Map a satellite ID to a local UDP port for simulation purposes."""
@@ -38,7 +35,6 @@ def resolve_satellite_port(sat_id: str) -> int:
     }
     return SAT_PORT_MAP.get(sat_id, 5001)  # fall back to SAT-001 if unknown
 
-
 def pick_satellite():
     """Use Dijkstra (via satellite_network) to find the best satellite right now."""
     now = datetime.now(timezone.utc)
@@ -57,16 +53,12 @@ def pick_satellite():
     raise RuntimeError("No satellite found in computed route")
 
 
-# ── Message counter ──────────────────────────────────────────────────────────
-
 message_count = 0
 
 def next_id():
     global message_count
     message_count += 1
     return message_count
-
-# ── Message building ─────────────────────────────────────────────────────────
 
 def build_message(msg_type, service, payload=None):
     return {
@@ -79,8 +71,6 @@ def build_message(msg_type, service, payload=None):
         "payload":     payload if payload else {},
     }
 
-# ── Transport ────────────────────────────────────────────────────────────────
-
 def make_rudp(sat_id: str) -> ReliableUDP:
     """Create a fresh ReliableUDP connection routed through the given satellite."""
     sat_port = resolve_satellite_port(sat_id)
@@ -90,13 +80,10 @@ def make_rudp(sat_id: str) -> ReliableUDP:
         peer_addr=("127.0.0.1", sat_port),
     )
 
-
 def transmit(rudp, message):
     encoded = json.dumps(message).encode()
     rudp.send(encoded)
     print(f"[SENT] {message['type']}  (id {message['msg_id']})")
-
-# ── Outgoing commands ────────────────────────────────────────────────────────
 
 def do_handshake(rudp):
     transmit(rudp, build_message("HELLO", "handshake"))
@@ -114,8 +101,6 @@ def send_control_command(rudp, yaw=None, pitch=None):
         return
 
     transmit(rudp, build_message("CONTROL_COMMAND", "control", payload))
-
-# ── Incoming display ─────────────────────────────────────────────────────────
 
 def show_telemetry(data):
     print("\n┌------ Live Turbine Data --------------")
@@ -154,8 +139,6 @@ def background_listener(rudp):
         except Exception as e:
             print(f"[WARN] Receive error: {e}")
 
-# ── Input parsing ────────────────────────────────────────────────────────────
-
 def parse_command(text):
     values = {}
     for part in text.split():
@@ -167,8 +150,6 @@ def parse_command(text):
         except ValueError:
             print(f"[WARN] Could not read '{key}' value — skipped")
     return values
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     # Ask the satellite network which satellite to route through right now.
