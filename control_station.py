@@ -1,150 +1,175 @@
-# libraries we need to talk to the satellite and handle messages
-import socket       # for network communication
-import json         # for encoding and decoding messages
-import time         # for timestamps and delays
-import threading    # to listen for incoming messages without blocking the main thread
+import socket
+from satellite_network import optimal_satellite_route, describe_route
+import json
+import time
+import threading
+from datetime import datetime, timezone
 
-# Settings
-SATELLITE_IP      = "127.0.0.1"
-SATELLITE_PORT    = 6001
-MY_PORT           = 6004
-MY_ID             = "CONTROL_1"
-TURBINE_ID        = "TURBINE_1"
+# Coordinates
+CONTROL_LAT = 51.23
+CONTROL_LON = -1.58
+TURBINE_LAT = 48.76
+TURBINE_LON = 2.34
 
-# Running counter so every message gets a unique number
+MY_PORT = 6005
+MY_ID = "CONTROL_1"
+TURBINE_ID = "TURBINE_1"
+TURBINE_ADDR = ("127.0.0.1", 6002)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", MY_PORT))   # 🔥 important: bind explicitly
+
 message_count = 0
 
-# Each call returns the next message number: 1, 2, 3 ...n
+
+# -------------------- MESSAGE UTILS --------------------
+
 def next_id():
     global message_count
     message_count += 1
     return message_count
 
-# Packages data into the format everyone agreed on.Every message in the system looks like this.
+
 def build_message(msg_type, service, payload=None):
     return {
-        "type":        msg_type,
-        "msg_id":      next_id(),
-        "node_id":     MY_ID,
+        "type": msg_type,
+        "msg_id": next_id(),
+        "node_id": MY_ID,
         "destination": TURBINE_ID,
-        "service":     service,
-        "timestamp":   time.time(),
-        "payload":     payload if payload else {},
+        "service": service,
+        "timestamp": time.time(),
+        "payload": payload or {},
     }
 
-# Convert message dict to bytes and fire it at the satellite.
-def transmit(sock, message):
-    encoded = json.dumps(message).encode()
-    sock.sendto(encoded, (SATELLITE_IP, SATELLITE_PORT))
-    print(f"[SENT] {message['type']}  (id {message['msg_id']})")
 
-# Outgoing messages: says hello so the turbine knows we are online.
-def do_handshake(sock):
-    transmit(sock, build_message("HELLO", "handshake"))
+def send_message(message):
+    data = json.dumps(message).encode()
+    sock.sendto(data, TURBINE_ADDR)
+    print(f"[SENT] {message['type']} (id {message['msg_id']})")
 
-# Request an immediate sensor snapshot from the turbine.
-def ask_for_telemetry(sock):
-    transmit(sock, build_message("TELEMETRY_REQUEST", "telemetry"))
 
-# Tell the turbine to move, you can set yaw, pitch, or both in a single command.
-def send_control_command(sock, yaw=None, pitch=None):
+# -------------------- SATELLITE ROUTING --------------------
+
+def pick_satellite():
+    now = datetime.now(timezone.utc)
+    route = optimal_satellite_route(
+        CONTROL_LAT, CONTROL_LON,
+        TURBINE_LAT, TURBINE_LON,
+        at_time=now,
+    )
+    print(f"\n[ROUTE]\n{describe_route(route)}\n")
+
+
+# -------------------- COMMANDS --------------------
+
+def do_handshake():
+    send_message(build_message("HELLO", "handshake"))
+
+
+def ask_for_telemetry():
+    send_message(build_message("TELEMETRY_REQUEST", "telemetry"))
+
+
+def send_control_command(yaw=None, pitch=None):
     payload = {}
-    if yaw   is not None: payload["yaw_angle"]   = yaw
-    if pitch is not None: payload["pitch_angle"] = pitch
+    if yaw is not None:
+        payload["yaw_angle"] = yaw
+    if pitch is not None:
+        payload["pitch_angle"] = pitch
 
     if not payload:
-        print("[INFO] Please provide at least one value — e.g. yaw=30")
+        print("[INFO] Provide yaw or pitch")
         return
 
-    transmit(sock, build_message("CONTROL_COMMAND", "control", payload))
+    send_message(build_message("CONTROL_COMMAND", "control", payload))
 
-# Incoming messages, display sensor readings in a clean block.
+
+# -------------------- RECEIVE --------------------
+
 def show_telemetry(data):
-    print("\n┌------ Live Turbine Data --------------")
-    for label, value in data.items():
-        print(f"│  {label:<22} {value}")
-    print("----------------------------------------\n")
+    print("\n----- Turbine Data -----")
+    for k, v in data.items():
+        print(f"{k}: {v}")
+    print("------------------------\n")
 
-#Work out what kind of message arrived and display it.
-def handle_reply(raw_bytes):
+
+def handle_reply(data):
     try:
-        msg = json.loads(raw_bytes.decode())
-    except json.JSONDecodeError:
-        print("[WARN] Garbled message received — skipping")
+        msg = json.loads(data.decode())
+        print(f"[DEBUG] Full message: {msg}")   # 🔥 debug visibility
+    except:
+        print("[WARN] Bad message")
         return
 
-    kind = msg.get("type", "UNKNOWN")
+    msg_type = msg.get("type")
 
-    if kind == "TELEMETRY":
+    if msg_type == "TELEMETRY":
         show_telemetry(msg.get("payload", {}))
 
-    elif kind == "ACK":
-        confirmed_id = msg["payload"].get("ack_for", "?")
-        changes      = msg["payload"].get("applied", {})
-        print(f"[ACK] Command {confirmed_id} applied — {changes}")
+    elif msg_type == "ACK":
+        print(f"[ACK] {msg.get('payload')}")
 
     else:
-        print(f"[RECV] {kind} from {msg.get('node_id', '?')}: {msg.get('payload', {})}")
+        print(f"[RECV] {msg_type}: {msg.get('payload')}")
 
 
-# Runs in a separate thread and sits quietly in the background waiting for anything the turbine sends back.
-def background_listener(sock):
+def listener():
+    print("[LISTENER] Started...")
     while True:
-        data, _ = sock.recvfrom(4096)
+        data, addr = sock.recvfrom(4096)
+        print(f"[DEBUG] Packet from {addr}")   # 🔥 critical debug
         handle_reply(data)
-        print("> ", end="", flush=True)   # keep the prompt visible
 
-# Input parsing: turn "yaw=45 pitch=-10" into {"yaw": 45.0, "pitch": -10.0}
+
+# -------------------- CLI --------------------
+
 def parse_command(text):
     values = {}
     for part in text.split():
-        if "=" not in part:
-            continue
-        key, _, raw_val = part.partition("=")
-        try:
-            values[key.strip()] = float(raw_val.strip())
-        except ValueError:
-            print(f"[WARN] Could not read '{key}' value — skipped")     # Skips any token it cannot understand.
+        if "=" in part:
+            k, v = part.split("=")
+            try:
+                values[k] = float(v)
+            except:
+                pass
     return values
 
+
 def main():
-    # Open one socket — used for both sending and receiving.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", MY_PORT))
-    print(f"[GROUND] Station {MY_ID} online, listening on port {MY_PORT}")
+    print(f"[CONTROL] Running on port {MY_PORT}")
 
-    # Kick off the background listener.
-    listener = threading.Thread(target=background_listener, args=(sock,), daemon=True)
-    listener.start()
+    # Start listener
+    threading.Thread(target=listener, daemon=True).start()
 
-    do_handshake(sock)
+    pick_satellite()
+    do_handshake()
 
-    print("\n----------- Ground Control Console -----------")
-    print("  yaw=<degrees>             rotate the turbine")
-    print("  pitch=<degrees>           adjust blade angle")
-    print("  yaw=<val> pitch=<val>     set both at once")
-    print("  telemetry                 request sensor snapshot")
-    print("  quit                      shut down\n")
+    print("\nCommands:")
+    print("  telemetry")
+    print("  yaw=30")
+    print("  pitch=10")
+    print("  yaw=30 pitch=10")
+    print("  quit\n")
 
-    # Operator input loop
     while True:
-        entry = input("> ").strip()
+        cmd = input("> ").strip()
 
-        if not entry:
-            continue
-        if entry.lower() == "quit":
-            print("Ground control shutting down. Goodbye.")
+        if cmd == "quit":
             break
-        if entry.lower() == "telemetry":
-            ask_for_telemetry(sock)
-            continue
-        params = parse_command(entry)
-        if params:
-            send_control_command(sock,
-                yaw   = params.get("yaw"),
-                pitch = params.get("pitch"))
+
+        elif cmd == "telemetry":
+            ask_for_telemetry()
+
         else:
-            print("[INFO] Unknown command. Try:  yaw=45  or  pitch=-10")
+            params = parse_command(cmd)
+            if params:
+                send_control_command(
+                    yaw=params.get("yaw"),
+                    pitch=params.get("pitch")
+                )
+            else:
+                print("Invalid command")
+
 
 if __name__ == "__main__":
     main()
