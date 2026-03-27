@@ -1,26 +1,73 @@
-# libraries we need to talk to the satellite and handle messages
-import socket       # for network communication
-import json         # for encoding and decoding messages
-import time         # for timestamps and delays
-import threading    # to listen for incoming messages without blocking the main thread
+from reliable_send import ReliableUDP
+from satellite_network import optimal_satellite_route, describe_route  # matches your teammate's filename
 
-# Settings
-SATELLITE_IP      = "127.0.0.1"
-SATELLITE_PORT    = 6001
-MY_PORT           = 6004
-MY_ID             = "CONTROL_1"
-TURBINE_ID        = "TURBINE_1"
+import json
+import time
+import threading
+from datetime import datetime, timezone
 
-# Running counter so every message gets a unique number
+# ── Ground station & turbine coordinates (randomly generated placeholders) ──
+CONTROL_LAT =  51.23   # ground control station
+CONTROL_LON =  -1.58
+
+TURBINE_LAT  =  48.76  # wind turbine field
+TURBINE_LON  =  2.34
+
+# ── Identity ────────────────────────────────────────────────────────────────
+MY_PORT    = 6004
+MY_ID      = "CONTROL_1"
+TURBINE_ID = "TURBINE_1"
+
+# ── Satellite routing ────────────────────────────────────────────────────────
+
+def resolve_satellite_port(sat_id: str) -> int:
+    """Map a satellite ID to a local UDP port for simulation purposes."""
+    SAT_PORT_MAP = {
+        "SAT-001": 5001,
+        "SAT-002": 5002,
+        "SAT-003": 5003,
+        "SAT-004": 5004,
+        "SAT-005": 5005,
+        "SAT-006": 5006,
+        "SAT-007": 5007,
+        "SAT-008": 5008,
+        "SAT-009": 5009,
+        "SAT-010": 5010,
+        "SAT-011": 5011,
+        "SAT-012": 5012,
+    }
+    return SAT_PORT_MAP.get(sat_id, 5001)  # fall back to SAT-001 if unknown
+
+
+def pick_satellite():
+    """Use Dijkstra (via satellite_network) to find the best satellite right now."""
+    now = datetime.now(timezone.utc)
+    route = optimal_satellite_route(
+        CONTROL_LAT, CONTROL_LON,
+        TURBINE_LAT,  TURBINE_LON,
+        at_time=now,
+    )
+    print(f"\n[ROUTE] {describe_route(route)}\n")
+
+    # The path looks like: SRC -> SAT-XXX -> ... -> DST
+    # First hop after SRC is the satellite we uplink through.
+    for node in route.node_path:
+        if node.startswith("SAT-"):
+            return node
+    raise RuntimeError("No satellite found in computed route")
+
+
+# ── Message counter ──────────────────────────────────────────────────────────
+
 message_count = 0
 
-# Each call returns the next message number: 1, 2, 3 ...n
 def next_id():
     global message_count
     message_count += 1
     return message_count
 
-# Packages data into the format everyone agreed on.Every message in the system looks like this.
+# ── Message building ─────────────────────────────────────────────────────────
+
 def build_message(msg_type, service, payload=None):
     return {
         "type":        msg_type,
@@ -32,22 +79,32 @@ def build_message(msg_type, service, payload=None):
         "payload":     payload if payload else {},
     }
 
-# Convert message dict to bytes and fire it at the satellite.
-def transmit(sock, message):
+# ── Transport ────────────────────────────────────────────────────────────────
+
+def make_rudp(sat_id: str) -> ReliableUDP:
+    """Create a fresh ReliableUDP connection routed through the given satellite."""
+    sat_port = resolve_satellite_port(sat_id)
+    print(f"[ROUTE] Uplink via {sat_id} on port {sat_port}")
+    return ReliableUDP(
+        local_addr=("127.0.0.1", MY_PORT),
+        peer_addr=("127.0.0.1", sat_port),
+    )
+
+
+def transmit(rudp, message):
     encoded = json.dumps(message).encode()
-    sock.sendto(encoded, (SATELLITE_IP, SATELLITE_PORT))
+    rudp.send(encoded)
     print(f"[SENT] {message['type']}  (id {message['msg_id']})")
 
-# Outgoing messages: says hello so the turbine knows we are online.
-def do_handshake(sock):
-    transmit(sock, build_message("HELLO", "handshake"))
+# ── Outgoing commands ────────────────────────────────────────────────────────
 
-# Request an immediate sensor snapshot from the turbine.
-def ask_for_telemetry(sock):
-    transmit(sock, build_message("TELEMETRY_REQUEST", "telemetry"))
+def do_handshake(rudp):
+    transmit(rudp, build_message("HELLO", "handshake"))
 
-# Tell the turbine to move, you can set yaw, pitch, or both in a single command.
-def send_control_command(sock, yaw=None, pitch=None):
+def ask_for_telemetry(rudp):
+    transmit(rudp, build_message("TELEMETRY_REQUEST", "telemetry"))
+
+def send_control_command(rudp, yaw=None, pitch=None):
     payload = {}
     if yaw   is not None: payload["yaw_angle"]   = yaw
     if pitch is not None: payload["pitch_angle"] = pitch
@@ -56,16 +113,17 @@ def send_control_command(sock, yaw=None, pitch=None):
         print("[INFO] Please provide at least one value — e.g. yaw=30")
         return
 
-    transmit(sock, build_message("CONTROL_COMMAND", "control", payload))
+    transmit(rudp, build_message("CONTROL_COMMAND", "control", payload))
 
-# Incoming messages, display sensor readings in a clean block.
+# ── Incoming display ─────────────────────────────────────────────────────────
+
 def show_telemetry(data):
     print("\n┌------ Live Turbine Data --------------")
     for label, value in data.items():
         print(f"│  {label:<22} {value}")
     print("----------------------------------------\n")
 
-#Work out what kind of message arrived and display it.
+
 def handle_reply(raw_bytes):
     try:
         msg = json.loads(raw_bytes.decode())
@@ -87,14 +145,17 @@ def handle_reply(raw_bytes):
         print(f"[RECV] {kind} from {msg.get('node_id', '?')}: {msg.get('payload', {})}")
 
 
-# Runs in a separate thread and sits quietly in the background waiting for anything the turbine sends back.
-def background_listener(sock):
+def background_listener(rudp):
     while True:
-        data, _ = sock.recvfrom(4096)
-        handle_reply(data)
-        print("> ", end="", flush=True)   # keep the prompt visible
+        try:
+            data = rudp.recv()
+            handle_reply(data)
+            print("> ", end="", flush=True)
+        except Exception as e:
+            print(f"[WARN] Receive error: {e}")
 
-# Input parsing: turn "yaw=45 pitch=-10" into {"yaw": 45.0, "pitch": -10.0}
+# ── Input parsing ────────────────────────────────────────────────────────────
+
 def parse_command(text):
     values = {}
     for part in text.split():
@@ -104,47 +165,64 @@ def parse_command(text):
         try:
             values[key.strip()] = float(raw_val.strip())
         except ValueError:
-            print(f"[WARN] Could not read '{key}' value — skipped")     # Skips any token it cannot understand.
+            print(f"[WARN] Could not read '{key}' value — skipped")
     return values
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main():
-    # Open one socket — used for both sending and receiving.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", MY_PORT))
+    # Ask the satellite network which satellite to route through right now.
+    sat_id = pick_satellite()
+
+    rudp = make_rudp(sat_id)
     print(f"[GROUND] Station {MY_ID} online, listening on port {MY_PORT}")
 
-    # Kick off the background listener.
-    listener = threading.Thread(target=background_listener, args=(sock,), daemon=True)
+    # Background listener for replies coming back from the turbine.
+    listener = threading.Thread(target=background_listener, args=(rudp,), daemon=True)
     listener.start()
 
-    do_handshake(sock)
+    do_handshake(rudp)
 
     print("\n----------- Ground Control Console -----------")
     print("  yaw=<degrees>             rotate the turbine")
     print("  pitch=<degrees>           adjust blade angle")
     print("  yaw=<val> pitch=<val>     set both at once")
     print("  telemetry                 request sensor snapshot")
+    print("  reroute                   recompute best satellite now")
     print("  quit                      shut down\n")
 
-    # Operator input loop
     while True:
         entry = input("> ").strip()
 
         if not entry:
             continue
+
         if entry.lower() == "quit":
             print("Ground control shutting down. Goodbye.")
+            rudp.close()
             break
-        if entry.lower() == "telemetry":
-            ask_for_telemetry(sock)
+
+        if entry.lower() == "reroute":
+            # Recompute the best satellite and reconnect.
+            rudp.close()
+            sat_id = pick_satellite()
+            rudp = make_rudp(sat_id)
+            listener = threading.Thread(target=background_listener, args=(rudp,), daemon=True)
+            listener.start()
             continue
+
+        if entry.lower() == "telemetry":
+            ask_for_telemetry(rudp)
+            continue
+
         params = parse_command(entry)
         if params:
-            send_control_command(sock,
+            send_control_command(rudp,
                 yaw   = params.get("yaw"),
                 pitch = params.get("pitch"))
         else:
             print("[INFO] Unknown command. Try:  yaw=45  or  pitch=-10")
+
 
 if __name__ == "__main__":
     main()
